@@ -2,6 +2,7 @@
 
 ## Overview
 The **Lab & Quiz Marks Sheet Digitizer** is an AI-powered software utility designed to automate the digitization of tabular student assessment records from scanned or photographed marks sheets. By leveraging multimodal vision-language models and structured validation pipelines, the system eliminates manual data entry bottlenecks, reduces transcription errors, and provides an interactive human-in-the-loop verification workflow prior to exporting clean spreadsheet-ready CSV files.
+**Live Demo:** [https://marks-sheet-digitizer-iuu6538vhzkaakxqrebpgi.streamlit.app](https://marks-sheet-digitizer-iuu6538vhzkaakxqrebpgi.streamlit.app)
 
 ---
 

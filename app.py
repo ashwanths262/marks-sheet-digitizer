@@ -9,29 +9,48 @@ st.title("📝 Marks Sheet Digitizer")
 
 api_key = st.sidebar.text_input("Paste Gemini API Key", type="password")
 max_marks = st.sidebar.number_input("Max Marks", value=20)
-uploaded_file = st.file_uploader("Upload Marks Sheet Photo", type=["jpg", "png", "jpeg"])
+uploaded_files = st.file_uploader(
+    "Upload Marks Sheet Photos",
+    type=["jpg", "png", "jpeg"],
+    accept_multiple_files=True,
+)
 
-if uploaded_file and api_key:
+# Reset cached extraction if the uploaded file set changes
+current_file_names = [f.name for f in uploaded_files] if uploaded_files else []
+if st.session_state.get("uploaded_names") != current_file_names:
+    st.session_state.uploaded_names = current_file_names
+    st.session_state.pop("data", None)
+
+if uploaded_files and api_key:
     col1, col2 = st.columns(2)
     with col1:
-        st.image(uploaded_file, caption="Your Sheet", use_container_width=True)
+        for file in uploaded_files:
+            st.image(file, caption=file.name, use_container_width=True)
+
     with col2:
         if st.button("Extract Marks") or "data" in st.session_state:
             if "data" not in st.session_state:
                 client = genai.Client(api_key=api_key)
-                img = Image.open(uploaded_file)
                 prompt = """
                 Read this marks table. Return ONLY a valid JSON list of objects.
                 Format: [{"roll_no": "101", "marks": 18, "low_confidence": false}]
                 Set low_confidence to true if handwriting is messy/unclear.
                 """
-                with st.spinner("Reading sheet..."):
-                    res = client.models.generate_content(
-                        model="gemini-3.5-flash-lite",
-                        contents=[img, prompt]
-                    )
-                    clean_json = res.text.replace("```json", "").replace("```", "").strip()
-                    st.session_state.data = pd.DataFrame(json.loads(clean_json))
+                all_rows = []
+                with st.spinner(f"Reading {len(uploaded_files)} sheet(s)..."):
+                    for file in uploaded_files:
+                        img = Image.open(file)
+                        res = client.models.generate_content(
+                            model="gemini-3.5-flash-lite",
+                            contents=[img, prompt]
+                        )
+                        clean_json = res.text.replace("```json", "").replace("```", "").strip()
+                        rows = json.loads(clean_json)
+                        for row in rows:
+                            row["sheet"] = file.name
+                        all_rows.extend(rows)
+
+                st.session_state.data = pd.DataFrame(all_rows)
 
             df = st.session_state.data.copy()
 
@@ -47,7 +66,10 @@ if uploaded_file and api_key:
             df.loc[df.duplicated("roll_no", keep=False), "Status"] += " ⚠️ Duplicate"
 
             st.subheader("Edit & Verify")
-            edited_df = st.data_editor(df[["roll_no", "marks", "Status"]], use_container_width=True)
+            edited_df = st.data_editor(
+                df[["sheet", "roll_no", "marks", "Status"]],
+                use_container_width=True,
+            )
 
             csv = edited_df[["roll_no", "marks"]].to_csv(index=False)
             st.download_button("⬇️ Download Clean CSV", csv, "marks.csv", "text/csv")

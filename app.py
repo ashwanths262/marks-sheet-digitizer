@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 import time
 import pandas as pd
@@ -28,7 +29,7 @@ def extract_with_retry(client, img, prompt):
     last_err = None
 
     for model_name in models_to_try:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 res = client.models.generate_content(
                     model=model_name,
@@ -37,11 +38,32 @@ def extract_with_retry(client, img, prompt):
                 clean_json = (
                     res.text.replace("```json", "").replace("```", "").strip()
                 )
-                return json.loads(clean_json)
+                raw_rows = json.loads(clean_json)
+                normalized = []
+                for item in raw_rows:
+                    normalized.append(
+                        {
+                            "roll_no": item.get("r", item.get("roll_no", "")),
+                            "marks": item.get("m", item.get("marks", None)),
+                            "low_confidence": item.get(
+                                "lc", item.get("low_confidence", False)
+                            ),
+                        }
+                    )
+                return normalized
             except errors.ServerError as e:
                 last_err = e
-                time.sleep(2 * (attempt + 1))
+                time.sleep(1 * (attempt + 1))
     raise last_err
+
+
+def process_single_file(client, file, prompt):
+    img = Image.open(file).convert("RGB")
+    img.thumbnail((1400, 1400))
+    rows = extract_with_retry(client, img, prompt)
+    for row in rows:
+        row["sheet"] = file.name
+    return rows
 
 
 if uploaded_files and api_key:
@@ -56,24 +78,29 @@ if uploaded_files and api_key:
                 client = genai.Client(api_key=api_key)
                 prompt = """
                 Read this marks table. Return ONLY a valid JSON list of objects.
-                Format: [{"roll_no": "101", "marks": 18, "low_confidence": false}]
-                Set low_confidence to true if handwriting is messy/unclear.
+                Format: [{"r": "101", "m": 18, "lc": false}]
+                Set lc to true if handwriting is messy/unclear.
                 """
                 all_rows = []
-                with st.spinner(f"Reading {len(uploaded_files)} sheet(s)..."):
-                    for file in uploaded_files:
-                        img = Image.open(file)
-                        img.thumbnail((1600, 1600))
-                        try:
-                            rows = extract_with_retry(client, img, prompt)
-                            for row in rows:
-                                row["sheet"] = file.name
-                            all_rows.extend(rows)
-                        except errors.ServerError:
-                            st.error(
-                                f"Gemini server is temporarily overloaded while reading `{file.name}`. Please wait a few seconds and click Extract Marks again."
-                            )
-                            st.stop()
+                max_workers = min(3, len(uploaded_files))
+                with st.spinner(
+                    f"Reading {len(uploaded_files)} sheet(s) in parallel..."
+                ):
+                    try:
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            futures = [
+                                executor.submit(
+                                    process_single_file, client, file, prompt
+                                )
+                                for file in uploaded_files
+                            ]
+                            for future in futures:
+                                all_rows.extend(future.result())
+                    except errors.ServerError:
+                        st.error(
+                            "Gemini server is temporarily overloaded. Please wait a few seconds and click Extract Marks again."
+                        )
+                        st.stop()
 
                 st.session_state.data = pd.DataFrame(all_rows)
 

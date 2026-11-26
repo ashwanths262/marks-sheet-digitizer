@@ -34,6 +34,8 @@ min_marks = st.sidebar.number_input("Minimum Marks", min_value=0, max_value=100,
 PRIMARY_MODEL = "gemini-3.8-flash"
 FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
+OUTPUT_COLUMNS = ["roll_no", "name", "marks"]
+
 
 def prepare_image_bytes(uploaded_file) -> bytes:
     """Resize image cleanly to speed up Gemini Vision upload & inference while keeping handwriting sharp."""
@@ -92,7 +94,6 @@ def extract_from_single_image(file_name: str, img_bytes: bytes) -> list[dict]:
                             "roll_no": roll_val,
                             "name": name_val,
                             "marks": marks_val,
-                            "sheet_source": file_name,
                         }
                     )
                 return cleaned_rows
@@ -103,53 +104,47 @@ def extract_from_single_image(file_name: str, img_bytes: bytes) -> list[dict]:
     raise RuntimeError(f"Failed to process {file_name}: {last_error}")
 
 
-def check_errors(df: pd.DataFrame, min_val: float, max_val: float) -> pd.DataFrame:
-    """Flag duplicate roll numbers, missing names, and invalid/out-of-range marks safely."""
-    df = df.copy()
+def check_errors(df: pd.DataFrame, min_val: float, max_val: float) -> list[str]:
+    """Validate rows for duplicate roll numbers, missing names, and out-of-range/invalid marks."""
+    work = df.copy()
+    for col in OUTPUT_COLUMNS:
+        if col not in work.columns:
+            work[col] = ""
 
-    # Ensure required columns exist
-    for col in ["roll_no", "name", "marks", "sheet_source"]:
-        if col not in df.columns:
-            df[col] = ""
+    work["roll_no"] = work["roll_no"].fillna("").astype(str).str.strip()
+    work["name"] = work["name"].fillna("").astype(str).str.strip()
+    marks_raw = work["marks"].fillna("").astype(str).str.strip()
+    numeric_marks = pd.to_numeric(marks_raw, errors="coerce")
 
-    df["roll_no"] = df["roll_no"].fillna("").astype(str).str.strip()
-    df["name"] = df["name"].fillna("").astype(str).str.strip()
-    df["marks_raw"] = df["marks"].fillna("").astype(str).str.strip()
+    non_empty_rolls = work["roll_no"] != ""
+    dup_mask = non_empty_rolls & work.duplicated(subset=["roll_no"], keep=False)
 
-    # Coerce marks to numeric safely without touching 'name'
-    numeric_marks = pd.to_numeric(df["marks_raw"], errors="coerce")
-
-    # Duplicate roll_no check (ignoring empty strings)
-    non_empty_rolls = df["roll_no"] != ""
-    dup_mask = non_empty_rolls & df.duplicated(subset=["roll_no"], keep=False)
-
-    statuses = []
-    for idx in range(len(df)):
+    warnings = []
+    for idx in range(len(work)):
         issues = []
-        r_val = df.loc[idx, "roll_no"]
-        n_val = df.loc[idx, "name"]
-        m_raw = df.loc[idx, "marks_raw"]
+        r_val = work.loc[idx, "roll_no"]
+        n_val = work.loc[idx, "name"]
+        m_raw = marks_raw.iloc[idx]
         m_num = numeric_marks.iloc[idx]
 
         if not r_val:
-            issues.append("Missing Roll No")
+            issues.append("missing roll_no")
         if dup_mask.iloc[idx]:
-            issues.append("Duplicate Roll No")
+            issues.append("duplicate roll_no")
         if not n_val:
-            issues.append("Missing Name")
+            issues.append("missing name")
 
         if m_raw.upper() in {"AB", "ABSENT", "NA", "-"}:
-            issues.append("Absent")
+            issues.append("absent")
         elif pd.isna(m_num):
-            issues.append("Non-numeric Marks")
+            issues.append("non-numeric marks")
         elif m_num < min_val or m_num > max_val:
-            issues.append(f"Out of Range ({min_val}-{max_val})")
+            issues.append(f"marks outside {min_val}-{max_val}")
 
-        statuses.append("OK" if not issues else "; ".join(issues))
+        if issues:
+            warnings.append(f"Row {idx + 1} (roll_no: '{r_val or '?'}'): {', '.join(issues)}")
 
-    df["status"] = statuses
-    df.drop(columns=["marks_raw"], inplace=True)
-    return df
+    return warnings
 
 
 # --- File Uploader & Session State ---
@@ -192,32 +187,33 @@ if uploaded_files:
                     st.error(err)
 
                 if all_rows:
-                    st.session_state["extracted_df"] = pd.DataFrame(all_rows)
+                    st.session_state["extracted_df"] = pd.DataFrame(all_rows)[OUTPUT_COLUMNS]
 
         if "extracted_df" in st.session_state and not st.session_state["extracted_df"].empty:
-            validated_df = check_errors(st.session_state["extracted_df"], min_marks, max_marks)
+            base_df = st.session_state["extracted_df"][OUTPUT_COLUMNS].copy()
+            row_warnings = check_errors(base_df, min_marks, max_marks)
 
-            # Summary metrics
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Rows Extracted", len(validated_df))
-            flagged_count = (validated_df["status"] != "OK").sum()
-            c2.metric("Flagged Rows", int(flagged_count))
-            c3.metric("Sheets Processed", validated_df["sheet_source"].nunique())
+            c1, c2 = st.columns(2)
+            c1.metric("Total Rows Extracted", len(base_df))
+            c2.metric("Validation Flags", len(row_warnings))
+
+            if row_warnings:
+                with st.expander("Validation Warnings", expanded=False):
+                    for w in row_warnings:
+                        st.write(f"- {w}")
 
             st.subheader("Verify & Edit Extracted Data")
             edited_df = st.data_editor(
-                validated_df,
+                base_df,
                 num_rows="dynamic",
                 use_container_width=True,
-                column_order=["roll_no", "name", "marks", "sheet_source", "status"],
-            )
+                column_order=OUTPUT_COLUMNS,
+            )[OUTPUT_COLUMNS]
 
-            # Export clean CSV with roll_no, name, and marks included
-            export_cols = ["roll_no", "name", "marks", "sheet_source", "status"]
-            csv_data = edited_df[export_cols].to_csv(index=False).encode("utf-8")
+            csv_data = edited_df.to_csv(index=False).encode("utf-8")
 
             st.download_button(
-                label="Download Final CSV (with Names)",
+                label="Download Final CSV",
                 data=csv_data,
                 file_name="digitized_marks.csv",
                 mime="text/csv",

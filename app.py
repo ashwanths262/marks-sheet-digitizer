@@ -15,7 +15,6 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-# Reset cached extraction if the uploaded file set changes
 current_file_names = [f.name for f in uploaded_files] if uploaded_files else []
 if st.session_state.get("uploaded_names") != current_file_names:
     st.session_state.uploaded_names = current_file_names
@@ -54,9 +53,27 @@ if uploaded_files and api_key:
 
             df = st.session_state.data.copy()
 
+            if df.empty:
+                st.warning("No rows were extracted from the uploaded sheets.")
+                st.stop()
+
+            if "roll_no" not in df.columns:
+                df["roll_no"] = ""
+            if "marks" not in df.columns:
+                df["marks"] = None
+            if "low_confidence" not in df.columns:
+                df["low_confidence"] = False
+            else:
+                df["low_confidence"] = df["low_confidence"].fillna(False).astype(bool)
+
+            df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
+
             def check_errors(row):
                 errors = []
-                if row["marks"] > max_marks or row["marks"] < 0:
+                marks_val = row["marks"]
+                if pd.isna(marks_val):
+                    errors.append("⚠️ Non-Numeric / Missing Marks")
+                elif marks_val > max_marks or marks_val < 0:
                     errors.append("❌ Out of Range")
                 if row["low_confidence"]:
                     errors.append("🔍 Check Handwriting")
